@@ -5,7 +5,7 @@ import sys
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-from Block import Block
+from Block import Block, decrypt_data, encrypt_data
 
 BLOCKCHAIN_FILE = 'blockchain.dat'
 BLOCK_SIZE = 158
@@ -32,14 +32,6 @@ def init():
         print("Blockchain file not found. Created INITIAL block.")
     else:
         print("Blockchain file found with INITIAL block.")
-
-def decrypt_data(encrypted_data, key):
-    """
-    Decrypts data using AES ECB mode with the provided key.
-    """
-    cipher = AES.new(key, AES.MODE_ECB)
-    decrypted_data = unpad(cipher.decrypt(encrypted_data), AES.block_size)
-    return decrypted_data
 
 def show_cases():
     """
