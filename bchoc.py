@@ -4,14 +4,28 @@ import os
 import struct
 import argparse
 import sys
+import uuid
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
+from datetime import datetime, timezone
 from Block import Block, decrypt_data, encrypt_data, validate_password, read_blockchain
 
 BLOCKCHAIN_FILE = 'blockchain.dat'
 BLOCK_SIZE = 158
 AES_KEY = b"R0chLi4uLi4uLi4="
+
+ALLOWED_OWNER_ROLES = ['police', 'lawyer', 'analyst', 'executive']
+ALLOWED_CREATOR_ROLES = ['creator']
+REMOVED_STATES = [b'DISPOSED', b'DESTROYED', b'RELEASED']
+
+ROLE_TO_ENV_VAR = {
+    'police': 'BCHOC_PASSWORD_POLICE',
+    'lawyer': 'BCHOC_PASSWORD_LAWYER',
+    'analyst': 'BCHOC_PASSWORD_ANALYST',
+    'executive': 'BCHOC_PASSWORD_EXECUTIVE',
+    'creator': 'BCHOC_PASSWORD_CREATOR'
+}
 
 def init():
     """
@@ -32,8 +46,89 @@ def init():
         with open(BLOCKCHAIN_FILE, 'wb') as f:
             f.write(genesis_block.pack())
         print("Blockchain file not found. Created INITIAL block.")
+
     else:
         print("Blockchain file found with INITIAL block.")
+
+def add(case_id_str: str, item_ids_list: list[str], creator_str: str, password: str):
+    """Adds one or more new evidence items to the blockchain for a given case."""
+
+    validate_password(password, ALLOWED_CREATOR_ROLES) # Exits on failure
+
+    filepath = BLOCKCHAIN_FILE
+    if not os.path.exists(filepath):
+        init()
+
+    try:
+        blocks = read_blockchain()
+
+        existing_evidence_ids = set()
+
+        genesis_evidence_id = b'0' * 32
+        for block in blocks:
+            if block.evidence_id != genesis_evidence_id:
+                 existing_evidence_ids.add(block.evidence_id)
+
+        last_block_in_chain = blocks[-1]
+        current_prev_hash = calculate_hash(last_block_in_chain.pack())
+
+        try:
+            uuid.UUID(case_id_str)
+            encrypted_case_id = encrypt_data(uuid.UUID(case_id_str).bytes, AES_KEY)
+        except ValueError:
+             print(f"Warning: Case ID '{case_id_str}' is not a valid UUID. Proceeding with string.", file=sys.stderr)
+             encrypted_case_id = encrypt_data(case_id_str.encode('utf-8'), AES_KEY)
+
+        creator_bytes = creator_str.encode('utf-8').ljust(12, b'\x00')
+        owner_bytes = creator_bytes # Creator is initial owner
+
+        items_added_this_run = 0
+        for item_id_str in item_ids_list:
+
+            encrypted_evidence_id = encrypt_data(item_id_str.encode('utf-8'), AES_KEY)
+
+            timestamp = datetime.now(timezone.utc).timestamp()
+            new_state = b'CHECKEDIN\0\0\0\0'
+            data_length = 0
+            data = b''
+
+            # Create the Block object
+            new_block = Block(
+                prev_hash=current_prev_hash,
+                timestamp=timestamp,
+                case_id=encrypted_case_id,
+                evidence_id=encrypted_evidence_id,
+                state=new_state,
+                creator=creator_bytes,
+                owner=owner_bytes,
+                data_length=data_length,
+                data=data
+            )
+
+            # Pack and Append
+            packed_new_block = new_block.pack()
+
+            with open(filepath, 'ab') as f:
+                f.write(packed_new_block)
+
+            print(f"Added item: {item_id_str}")
+            print(f"Status: CHECKEDIN")
+            timestamp_str = datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec='microseconds') + 'Z'
+            print(f"Time of action: {timestamp_str}")
+            if len(item_ids_list) > 1 and items_added_this_run < len(item_ids_list) - 1:
+                 print()
+
+            items_added_this_run += 1
+
+            #Updating prev_hash for the next bloc
+            current_prev_hash = calculate_hash(packed_new_block)
+
+            # Add to set to prevent duplicates within the same command run
+            existing_evidence_ids.add(encrypted_evidence_id)
+
+    except (IOError, struct.error, ValueError, Exception) as e:
+        print(f"An error occurred during add: {e}", file=sys.stderr)
+        sys.exit(1)
 
 def checkout(item_id_str: str, password: str):
     """Checks out an item, adding a new block to the chain."""
