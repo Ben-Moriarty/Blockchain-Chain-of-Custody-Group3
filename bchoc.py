@@ -356,6 +356,137 @@ def show_cases():
     else:
         print("No cases found.")
 
+def show_history(case_id_str: str | None, item_id_str: str | None, num_entries: int | None, reverse_order: bool, password: str):
+    """
+    Displays the history of blockchain entries, optionally filtered by case/item ID,
+    limited by number of entries, and ordered. Requires a valid password for decryption.
+    """
+    # Validate password - allows any valid role (owner or creator) to view history
+    # This ensures the user has *some* valid credentials before proceeding.
+    # Decryption will still depend on this password being correct for AES_KEY.
+    validate_password(password, ALLOWED_OWNER_ROLES + ALLOWED_CREATOR_ROLES) # Exits on failure
+
+    try:
+        all_blocks = read_blockchain()
+        if not all_blocks:
+            print("Blockchain is empty or not initialized.")
+            return
+        # Skip the Genesis block for history display
+        all_blocks = all_blocks[1:]
+        if not all_blocks:
+            print("No history entries found (only Genesis block exists).")
+            return
+
+    except FileNotFoundError:
+        print(f"Error: Blockchain file '{BLOCKCHAIN_FILE}' not found. Run 'init' first.", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error reading or parsing blockchain: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    filtered_blocks = []
+    target_case_id_encrypted = None
+    if case_id_str:
+        try:
+            # Attempt UUID conversion first for encryption, fallback to string encoding
+            try:
+                 target_case_id_encrypted = encrypt_data(uuid.UUID(case_id_str).bytes, AES_KEY)
+            except ValueError:
+                 print(f"Warning: Provided Case ID '{case_id_str}' is not a valid UUID. Filtering based on string.", file=sys.stderr)
+                 target_case_id_encrypted = encrypt_data(case_id_str.encode('utf-8'), AES_KEY)
+        except Exception as e:
+             print(f"Error processing provided case ID for filtering: {e}", file=sys.stderr)
+             sys.exit(1) # Cannot proceed with filtering if encryption fails
+
+    target_evidence_id_encrypted = None
+    if item_id_str:
+        try:
+            target_evidence_id_encrypted = encrypt_data(item_id_str.encode('utf-8'), AES_KEY)
+        except Exception as e:
+             print(f"Error processing provided item ID for filtering: {e}", file=sys.stderr)
+             sys.exit(1) # Cannot proceed with filtering if encryption fails
+
+    # Filter blocks based on provided criteria
+    for block in all_blocks:
+        match = True
+        # Apply case ID filter if provided
+        if target_case_id_encrypted and block.case_id != target_case_id_encrypted:
+            match = False
+        # Apply item ID filter if provided
+        if target_evidence_id_encrypted and block.evidence_id != target_evidence_id_encrypted:
+            match = False
+
+        if match:
+            filtered_blocks.append(block)
+
+    # Apply ordering
+    if reverse_order:
+        filtered_blocks.reverse() # Show most recent first
+
+    # Apply entry limit
+    if num_entries is not None:
+        if num_entries <= 0:
+             print("Warning: Number of entries (-n) must be positive. Showing 0 entries.", file=sys.stderr)
+             filtered_blocks = [] # Show nothing if n <= 0
+        else:
+             # Take the first 'num_entries' after sorting/reversing
+             filtered_blocks = filtered_blocks[:num_entries]
+
+    # Print the results
+    if not filtered_blocks:
+        print("No history found matching the criteria.")
+        return
+
+    first_entry = True
+    for block in filtered_blocks:
+        if not first_entry:
+            print() # Add blank line between entries as per example [Source 85]
+        else:
+            first_entry = False
+
+        # Attempt to decrypt IDs - password was validated, so decryption should work if key is right
+        try:
+            decrypted_case_bytes = decrypt_data(block.case_id, AES_KEY)
+            # Handle UUID vs String during decryption/decoding
+            try:
+                 # Try UUID first (16 bytes after decryption)
+                 case_display = str(uuid.UUID(bytes=decrypted_case_bytes))
+            except ValueError:
+                 # Fallback to UTF-8 string decoding, remove padding/nulls
+                 case_display = decrypted_case_bytes.decode('utf-8', errors='replace').rstrip('\x00').strip()
+        except Exception:
+             case_display = block.case_id.hex() # Fallback to hex if decryption/decoding fails [Source 65, 85]
+
+        try:
+             # Item ID is expected to be string originally
+             decrypted_item_bytes = decrypt_data(block.evidence_id, AES_KEY)
+             item_display = decrypted_item_bytes.decode('utf-8', errors='replace').rstrip('\x00').strip()
+        except Exception:
+             item_display = block.evidence_id.hex() # Fallback to hex [Source 65, 85]
+
+        # Decode state, removing null padding
+        try:
+            state_display = block.state.rstrip(b'\x00').decode('utf-8', 'replace')
+        except Exception:
+            state_display = block.state.hex() # Fallback if decoding fails
+
+        # Format timestamp to ISO 8601 UTC with 'Z'
+        try:
+             timestamp_dt = datetime.fromtimestamp(block.timestamp, timezone.utc)
+             # Ensure microseconds and 'Z' suffix are present
+             time_display = timestamp_dt.isoformat(timespec='microseconds').replace('+00:00', 'Z')
+             # Add 'Z' if isoformat didn't include it (older Python versions might not)
+             if not time_display.endswith('Z'):
+                  time_display += 'Z'
+        except Exception:
+             time_display = f"Invalid timestamp ({block.timestamp})" # Fallback
+
+        # Print according to the format in the example [Source 85]
+        print(f"Case: {case_display}")
+        print(f"Item: {item_display}")
+        print(f"Action: {state_display}")
+        print(f"Time: {time_display}")
+        
 def main():
     parser = argparse.ArgumentParser(prog="bchoc")
     subparsers = parser.add_subparsers(dest="command", required=True)
