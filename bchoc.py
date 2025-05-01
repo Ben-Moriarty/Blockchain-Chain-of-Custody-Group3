@@ -248,6 +248,56 @@ def show_cases():
     else:
         print("No cases found.")
 
+def show_items(case_id_str: str):
+    """
+    AI was utilized for fragments of this function
+    """
+
+    items = set()
+    password_valid = False
+    found = False
+
+    with open(BLOCKCHAIN_FILE, 'rb') as f:
+        while True:
+            block_data = f.read(BLOCK_SIZE)
+            if not block_data:
+                break
+            if len(block_data) != BLOCK_SIZE:
+                continue
+            try:
+                case_id_encoded = encrypt_data(case_id_str.encode('utf-8'), AES_KEY)
+                unpacked_block = struct.unpack("32s d 32s 32s 12s 12s 12s I 14s", block_data)
+                case_id_unpacked = unpacked_block[2]
+
+                password_input = input("Enter password to view decrypted Case ID: ")
+                valid_passwords = [
+                    os.getenv('BCHOC_PASSWORD_POLICE'),
+                    os.getenv('BCHOC_PASSWORD_LAWYER'),
+                    os.getenv('BCHOC_PASSWORD_ANALYST'),
+                    os.getenv('BCHOC_PASSWORD_EXECUTIVE'),
+                    os.getenv('BCHOC_PASSWORD_CREATOR')
+                ]
+                if password_input in valid_passwords:
+                    password_valid = True
+
+                if password_valid:
+                    if case_id_unpacked == case_id_encoded:
+                        found = True
+                        items.add(case_id_unpacked)
+                else:
+                    items.add(case_id_unpacked.hex())
+            except struct.error:
+                break
+
+    if items:
+        print("\nItems:")
+        print(f"Items ID: {items}")
+    else:
+        print("No items found.")
+
+def verify():
+    exit(1)
+
 def main():
     parser = argparse.ArgumentParser(prog="bchoc")
     subparsers = parser.add_subparsers(dest="command", required=True)
