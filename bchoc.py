@@ -631,6 +631,101 @@ def show_history(case_id_str: str | None, item_id_str: str | None, num_entries: 
         print(f"Item: {item_display}")
         print(f"Action: {state_display}")
         print(f"Time: {time_display}")
+
+def remove(item_id_str: str, reason: str, password: str):
+    """Marks an item as removed with the given reason (DISPOSED, DESTROYED, RELEASED)."""
+    validate_password(password, ALLOWED_CREATOR_ROLES)
+
+    reason_upper = reason.upper()
+    if reason_upper not in REMOVED_STATES:
+        print("Error: Invalid reason. Must be one of: DISPOSED, DESTROYED, or RELEASED.", file=sys.stderr)
+        sys.exit(1)
+
+    blocks = read_blockchain()
+    if not blocks:
+        print("Error: Blockchain is empty or not initialized.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        item_id_int = int(item_id_str)
+        item_bytes = item_id_int.to_bytes(4, 'big')
+        encrypted_evidence_id = encrypt_data(item_bytes, AES_KEY)
+    except:
+        print("Error processing item ID.", file=sys.stderr)
+        sys.exit(1)
+
+    last_item_block = None
+    for block in reversed(blocks):
+        if block.evidence_id == encrypted_evidence_id:
+            last_item_block = block
+            break
+
+    if not last_item_block:
+        print("Error: Item ID not found in blockchain.", file=sys.stderr)
+        sys.exit(1)
+
+    if last_item_block.state.rstrip(b'\x00') != b'CHECKEDIN':
+        print("Error: Item must be in CHECKEDIN state to be removed.", file=sys.stderr)
+        sys.exit(1)
+
+    prev_hash = calculate_hash(blocks[-1].pack())
+    timestamp = datetime.now(timezone.utc).timestamp()
+
+    new_block = Block(
+        prev_hash=prev_hash,
+        timestamp=timestamp,
+        case_id=last_item_block.case_id,
+        evidence_id=last_item_block.evidence_id,
+        state=reason_upper.ljust(12, b'\x00'),
+        creator=last_item_block.creator,
+        owner=b'\x00' * 12,
+        data_length=0,
+        data=b''
+    )
+
+    with open(get_blockchain_file_path(), 'ab') as f:
+        f.write(new_block.pack())
+
+    print(f"Item {item_id_str} successfully marked as {reason_upper.decode()}.")
+
+def summary(case_id_str: str):
+    """Displays a summary of item states for the given case ID."""
+    blocks = read_blockchain()
+    if not blocks:
+        print("Blockchain is empty or not initialized.")
+        return
+
+    try:
+        case_uuid = uuid.UUID(case_id_str)
+        case_bytes = encrypt_data(case_uuid.bytes, AES_KEY)
+    except ValueError:
+        case_bytes = encrypt_data(case_id_str.encode('utf-8'), AES_KEY)
+
+    item_states = {}
+    for block in blocks:
+        if block.case_id != case_bytes:
+            continue
+        item_id = block.evidence_id
+        state = block.state.rstrip(b'\x00').decode('utf-8')
+        item_states[item_id] = state
+
+    state_counts = {
+        'CHECKEDIN': 0,
+        'CHECKEDOUT': 0,
+        'DISPOSED': 0,
+        'DESTROYED': 0,
+        'RELEASED': 0
+    }
+
+    for state in item_states.values():
+        if state in state_counts:
+            state_counts[state] += 1
+
+    print(f"Summary for Case: {case_id_str}")
+    print(f"Total Unique Items: {len(item_states)}")
+    for state, count in state_counts.items():
+        print(f"{state}: {count}")
+
         
 def main():
     parser = argparse.ArgumentParser(prog="bchoc")
