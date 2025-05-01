@@ -917,6 +917,125 @@ def show_history(case_id_str: str | None, item_id_str: str | None, num_entries: 
 
     print("--- Finished Show History Process ---")
 
+def remove(item_id_str: str, reason: str, password: str):
+    """Marks an item as removed with the given reason (DISPOSED, DESTROYED, RELEASED)."""
+    # Allow Owners OR Creator to remove (More flexible - adjust if spec is strict)
+    # Or stick to creator if that's intended:
+    validate_password(password, ALLOWED_CREATOR_ROLES) # Stick to creator as per current code logic & test
+
+    # --- FIX START ---
+    # Convert input reason string to uppercase BYTES
+    reason_bytes = reason.upper().encode('utf-8')
+
+    # Check if the BYTES are in the list of valid BYTES states
+    if reason_bytes not in REMOVED_STATES:
+        # Keep the error message readable using string names
+        valid_reasons_str = ", ".join(r.decode('utf-8') for r in REMOVED_STATES)
+        print(f"Error: Invalid reason. Must be one of: {valid_reasons_str}.", file=sys.stderr)
+        sys.exit(1)
+    # --- FIX END ---
+
+    blocks = read_blockchain()
+    if not blocks:
+        print("Error: Blockchain is empty or not initialized.", file=sys.stderr)
+        sys.exit(1)
+
+    encrypted_evidence_id = None
+    try:
+        item_id_int = int(item_id_str)
+        if not (0 <= item_id_int <= 4294967295):
+            raise ValueError("Item ID out of range for 4 bytes.")
+        item_bytes = item_id_int.to_bytes(4, 'big', signed=False)
+        encrypted_evidence_id = encrypt_data(item_bytes, AES_KEY)
+    except (ValueError, TypeError) as e:
+        print(f"Error processing item ID '{item_id_str}': {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+         print(f"Unexpected error encrypting item ID '{item_id_str}': {e}", file=sys.stderr)
+         sys.exit(1)
+
+
+    last_item_block = None
+    for block in reversed(blocks):
+        if block.evidence_id == encrypted_evidence_id:
+            last_item_block = block
+            break
+
+    if not last_item_block:
+        print(f"Error: Item ID '{item_id_str}' (encrypted: {encrypted_evidence_id.hex()}) not found in blockchain.", file=sys.stderr)
+        sys.exit(1)
+
+    current_state_bytes = last_item_block.state.rstrip(b'\x00')
+    if current_state_bytes != b'CHECKEDIN':
+        state_str = current_state_bytes.decode('utf-8', 'replace')
+        print(f"Error: Item must be in CHECKEDIN state to be removed. Current state: {state_str}", file=sys.stderr)
+        sys.exit(1)
+
+    # Calculate prev_hash based on the *actual* last block in the chain
+    last_block_in_chain = blocks[-1]
+    prev_hash = calculate_hash(last_block_in_chain.pack())
+    timestamp = datetime.now(timezone.utc).timestamp()
+
+    # Create the new block using the validated reason_bytes
+    new_block = Block(
+        prev_hash=prev_hash,
+        timestamp=timestamp,
+        case_id=last_item_block.case_id, # Keep original case ID
+        evidence_id=last_item_block.evidence_id, # Keep original evidence ID
+        state=reason_bytes.ljust(12, b'\x00'), # Use the validated bytes, padded
+        creator=last_item_block.creator, # Keep original creator
+        owner=b'\x00' * 12, # Clear owner on removal
+        data_length=0,
+        data=b''
+    )
+
+    try:
+        with open(get_blockchain_file_path(), 'ab') as f:
+            f.write(new_block.pack())
+    except IOError as e:
+        print(f"CRITICAL Error writing removal block to file: {e}. Stopping.", file=sys.stderr)
+        sys.exit(1)
+
+    # Print success message using the decoded reason for readability
+    print(f"Item {item_id_str} successfully marked as {reason_bytes.decode()}.")
+    
+def summary(case_id_str: str):
+    """Displays a summary of item states for the given case ID."""
+    blocks = read_blockchain()
+    if not blocks:
+        print("Blockchain is empty or not initialized.")
+        return
+
+    try:
+        case_uuid = uuid.UUID(case_id_str)
+        case_bytes = encrypt_data(case_uuid.bytes, AES_KEY)
+    except ValueError:
+        case_bytes = encrypt_data(case_id_str.encode('utf-8'), AES_KEY)
+
+    item_states = {}
+    for block in blocks:
+        if block.case_id != case_bytes:
+            continue
+        item_id = block.evidence_id
+        state = block.state.rstrip(b'\x00').decode('utf-8')
+        item_states[item_id] = state
+
+    state_counts = {
+        'CHECKEDIN': 0,
+        'CHECKEDOUT': 0,
+        'DISPOSED': 0,
+        'DESTROYED': 0,
+        'RELEASED': 0
+    }
+
+    for state in item_states.values():
+        if state in state_counts:
+            state_counts[state] += 1
+
+    print(f"Summary for Case: {case_id_str}")
+    print(f"Total Unique Items: {len(item_states)}")
+    for state, count in state_counts.items():
+        print(f"{state}: {count}")
 
 # --- Main function and Argparse Setup ---
 # (No DEBUG prints added here, but calls functions that now have them)
@@ -958,18 +1077,18 @@ def main():
     show_history_parser.add_argument("-p", dest="password", required=True, help="Password for any valid role to decrypt history")
 
     # remove (Stub - needs implementation)
-    # remove_parser = subparsers.add_parser("remove", help="Mark an item as removed (DISPOSED, DESTROYED, RELEASED).")
-    # remove_parser.add_argument("-i", dest="item_id", required=True, help="Item ID (integer) to remove")
-    # remove_parser.add_argument("-y", dest="reason", required=True, choices=['DISPOSED', 'DESTROYED', 'RELEASED'], help="Reason for removal")
-    # remove_parser.add_argument("-o", dest="owner_info", help="Optional owner info/notes for removal") # Example optional field
-    # remove_parser.add_argument("-p", dest="password", required=True, help="Password for an owner role")
+    remove_parser = subparsers.add_parser("remove", help="Mark an item as removed (DISPOSED, DESTROYED, RELEASED).")
+    remove_parser.add_argument("-i", dest="item_id", required=True, help="Item ID (integer) to remove")
+    remove_parser.add_argument("-y", dest="reason", required=True, choices=['DISPOSED', 'DESTROYED', 'RELEASED'], help="Reason for removal")
+    remove_parser.add_argument("-o", dest="owner_info", help="Optional owner info/notes for removal") # Example optional field
+    remove_parser.add_argument("-p", dest="password", required=True, help="Password for an owner role")
 
     # verify
     subparsers.add_parser("verify", help="Verify the integrity of the blockchain.")
 
     # summary (Stub - needs implementation)
-    # summary_parser = subparsers.add_parser("summary", help="Show a summary of item states.")
-    # summary_parser.add_argument("-c", dest="case_id", help="Filter summary by Case ID") # Optional filter
+    summary_parser = subparsers.add_parser("summary", help="Show a summary of item states.")
+    summary_parser.add_argument("-c", dest="case_id", help="Filter summary by Case ID") # Optional filter
 
     try:
         args = parser.parse_args()
@@ -996,13 +1115,13 @@ def main():
             else:
                  print(f"Invalid show command: {args.show_command}", file=sys.stderr)
                  sys.exit(1)
-        # elif args.command == "remove":
-        #     # remove(args.item_id, args.reason, args.password) # Needs implementation
+        elif args.command == "remove":
+            remove(args.item_id, args.reason, args.password) # Needs implementation
         #     print("Remove command not yet implemented.", file=sys.stderr)
         elif args.command == "verify":
             verify()
-        # elif args.command == "summary":
-        #     # summary(args.case_id) # Needs implementation
+        elif args.command == "summary":
+            summary(args.case_id) # Needs implementation
         #      print("Summary command not yet implemented.", file=sys.stderr)
         else:
             # Should be caught by argparse 'required=True' on subparsers
