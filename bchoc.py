@@ -30,25 +30,38 @@ ROLE_TO_ENV_VAR = {
 def init():
     """
     Initializes the blockchain with a Genesis block if not already initialized.
+    Detects and resets the blockchain file if it is invalid.
     """
-    if not os.path.exists(BLOCKCHAIN_FILE):
-        genesis_block = Block(
-            prev_hash=b'\x00' * 32,           # Genesis block has no previous hash
-            timestamp=0.0,                    # Default timestamp for Genesis block
-            case_id=b'0' * 32,                # Placeholder case ID (32 zero bytes)
-            evidence_id=b'0' * 32,            # Placeholder evidence ID (32 zero bytes)
-            state=b'INITIAL\0\0\0\0\0',        # Initial state (padded to 12 bytes)
-            creator=b'\0' * 12,               # Creator (12 null bytes)
-            owner=b'\0' * 12,                 # Owner (12 null bytes)
-            data_length=14,                   # Length of the data (14 bytes)
-            data=b'Initial block\0'           # Data for the Genesis block
-        )
-        with open(BLOCKCHAIN_FILE, 'wb') as f:
-            f.write(genesis_block.pack())
-        print("Blockchain file not found. Created INITIAL block.")
+    if os.path.exists(BLOCKCHAIN_FILE):
+        try:
+            with open(BLOCKCHAIN_FILE, "rb") as f:
+                first_block = f.read(BLOCK_SIZE)
+                if len(first_block) != BLOCK_SIZE:
+                    raise ValueError("Blockchain file is invalid.")
+        except (ValueError, IOError):
+            print("Invalid blockchain file detected. Reinitializing...")
+            os.remove(BLOCKCHAIN_FILE)  # Delete corrupted file to reset
+        else:
+            print("Blockchain file found with INITIAL block.")
+            return
 
-    else:
-        print("Blockchain file found with INITIAL block.")
+    # Create Genesis block
+    genesis_block = Block(
+        prev_hash=b'\x00' * 32,           # Genesis block has no previous hash
+        timestamp=0.0,                    # Default timestamp for Genesis block
+        case_id=b'0' * 32,                # Placeholder case ID (32 zero bytes)
+        evidence_id=b'0' * 32,            # Placeholder evidence ID (32 zero bytes)
+        state=b'INITIAL\0\0\0\0\0',        # Initial state (padded to 12 bytes)
+        creator=b'\0' * 12,               # Creator (12 null bytes)
+        owner=b'\0' * 12,                 # Owner (12 null bytes)
+        data_length=14,                   # Length of the data (14 bytes)
+        data=b'Initial block\0'           # Data for the Genesis block
+    )
+
+    with open(BLOCKCHAIN_FILE, 'wb') as f:
+        f.write(genesis_block.pack())
+
+    print("Blockchain file initialized with Genesis block.")
 
 def add(case_id_str: str, item_ids_list: list[str], creator_str: str, password: str):
     """Adds one or more new evidence items to the blockchain for a given case."""
