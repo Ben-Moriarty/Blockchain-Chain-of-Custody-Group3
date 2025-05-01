@@ -27,6 +27,9 @@ ROLE_TO_ENV_VAR = {
     'creator': 'BCHOC_PASSWORD_CREATOR'
 }
 
+def verify():
+    exit(1)
+
 def get_blockchain_file_path():
     """Gets the blockchain file path, prioritizing the environment variable."""
     return os.getenv("BCHOC_FILE_PATH", 'blockchain.dat')
@@ -79,19 +82,13 @@ def add(case_id_str: str, item_ids_list: list[str], creator_str: str, password: 
         print("Blockchain file not found. Initializing...")
         init() # Create the file with Genesis block
 
-    # 3. Read the *entire* current blockchain
-    #    read_blockchain handles file reading errors internally and returns list
     blocks = read_blockchain()
 
-    # 4. Check if reading the blockchain failed catastrophically (e.g., empty list when init should have run)
     if not blocks:
-         # This case could happen if init() was called but failed to write,
-         # or if read_blockchain() encountered an error after init() succeeded.
          print("Error: Blockchain is empty or could not be read after initialization attempt.", file=sys.stderr)
          print("Run 'bchoc init' again manually or check file permissions.", file=sys.stderr)
          sys.exit(1) # Critical state, cannot proceed
 
-    # 5. Determine the hash of the last block
     last_block_in_chain = blocks[-1]
     try:
         current_prev_hash = calculate_hash(last_block_in_chain.pack())
@@ -103,14 +100,11 @@ def add(case_id_str: str, item_ids_list: list[str], creator_str: str, password: 
          sys.exit(1)
 
 
-    # 6. Prepare common data for the new block(s)
-    # Encrypt Case ID (handle UUID vs string)
     try:
         # Attempt to parse as UUID
         case_uuid = uuid.UUID(case_id_str)
         case_bytes = case_uuid.bytes
     except ValueError:
-        # If not a valid UUID, treat as a string and encode
         print(f"Warning: Case ID '{case_id_str}' is not a valid UUID. Storing as encoded string.", file=sys.stderr)
         case_bytes = case_id_str.encode('utf-8')
     try:
@@ -119,12 +113,10 @@ def add(case_id_str: str, item_ids_list: list[str], creator_str: str, password: 
         print(f"Error encrypting case ID: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Prepare creator/owner bytes (padded to 12 bytes)
     # Ensure creator string doesn't exceed 12 bytes after encoding
     creator_bytes = creator_str.encode('utf-8')[:12].ljust(12, b'\x00')
-    owner_bytes = creator_bytes # Creator is the initial owner
+    owner_bytes = b'\x00' * 12
 
-    # 7. Gather existing *encrypted* evidence IDs to check for duplicates
     existing_encrypted_evidence_ids = set()
     genesis_evidence_id = b'0' * 32 # Encrypted representation of zero ID in Genesis
     for block in blocks:
@@ -134,7 +126,6 @@ def add(case_id_str: str, item_ids_list: list[str], creator_str: str, password: 
 
     items_added_count = 0
     items_failed_count = 0
-    # Ensure blocks list exists before trying to get last block hash (should be guaranteed by check #4, but safer)
     if not blocks:
         print("Critical Error: Block list is empty before processing items.", file=sys.stderr)
         sys.exit(1)
@@ -148,32 +139,24 @@ def add(case_id_str: str, item_ids_list: list[str], creator_str: str, password: 
 
     for item_id_str in item_ids_list:
         try:
-            # --- Convert and Validate Item ID ---
             try:
                 item_id_int = int(item_id_str)
-                # Check range for 4 bytes (unsigned)
-                # Max value for 4 bytes unsigned is 2**32 - 1
                 if not (0 <= item_id_int <= 4294967295):
-                     # Error message specific to the requirement
                      raise ValueError("Item ID must be an integer representable in 4 bytes (0 to 4294967295).")
-                # Convert the integer to 4 bytes. Use big-endian as a common convention.
-                item_id_bytes = item_id_int.to_bytes(4, 'big', signed=False) # Use 'big' or 'little', be consistent
+                item_id_bytes = item_id_int.to_bytes(4, 'big', signed=False)
             except ValueError as e:
                  print(f"Error: Invalid Item ID '{item_id_str}'. {e}", file=sys.stderr)
                  items_failed_count += 1
                  continue # Skip this item
 
-            # --- Encrypt the 4-byte integer representation ---
             try:
                 encrypted_evidence_id = encrypt_data(item_id_bytes, AES_KEY) # Encrypt the 4 integer bytes
             except ValueError as e:
                 print(f"Error encrypting item ID '{item_id_str}': {e}", file=sys.stderr)
                 items_failed_count += 1
-                continue # Skip this item
+                continue
 
-            # **Check for Duplicates BEFORE adding**
             if encrypted_evidence_id in existing_encrypted_evidence_ids:
-                # NOTE: Now comparing encrypted 4-byte ints, not encrypted strings.
                 print(f"Error: Item ID '{item_id_str}' (encrypted int: {encrypted_evidence_id.hex()}) already exists. Skipping.", file=sys.stderr)
                 items_failed_count += 1
                 continue # Skip this item
@@ -181,18 +164,17 @@ def add(case_id_str: str, item_ids_list: list[str], creator_str: str, password: 
             # Prepare block data
             timestamp = datetime.now(timezone.utc).timestamp()
             new_state = b'CHECKEDIN\0\0\0\0' # Padded to 12 bytes
-            data_length = 0 # No extra data for 'add' action
+            data_length = 0
             data = b''
 
-            # Create the new Block object
             new_block = Block(
-                prev_hash=current_prev_hash, # Use hash from previous iteration or initial block
+                prev_hash=current_prev_hash,
                 timestamp=timestamp,
-                case_id=encrypted_case_id, # Already prepared outside loop
-                evidence_id=encrypted_evidence_id, # The encrypted 4-byte int
+                case_id=encrypted_case_id,
+                evidence_id=encrypted_evidence_id,
                 state=new_state,
-                creator=creator_bytes, # Already prepared outside loop
-                owner=owner_bytes,   # Already prepared outside loop
+                creator=creator_bytes,
+                owner=owner_bytes,  
                 data_length=data_length,
                 data=data
             )
@@ -211,31 +193,25 @@ def add(case_id_str: str, item_ids_list: list[str], creator_str: str, password: 
                     f.write(packed_new_block)
             except IOError as e:
                  print(f"Error writing block for item '{item_id_str}' to file: {e}. Stopping.", file=sys.stderr)
-                 # Treat remaining items as failed if we can't write
                  items_failed_count += (len(item_ids_list) - items_added_count - items_failed_count)
-                 break # Stop processing further items in this command
+                 break
 
-            # --- Print success message and FLUSH ---
-            print(f"Added item: {item_id_str}") # Display the original string ID for user readability
+            print(f"Added item: {item_id_str}")
             print(f"Status: CHECKEDIN")
             timestamp_dt = datetime.fromtimestamp(timestamp, timezone.utc)
             timestamp_str = timestamp_dt.isoformat(timespec='microseconds').replace('+00:00', 'Z')
             print(f"Time of action: {timestamp_str}")
-            sys.stdout.flush() # Explicitly flush output buffer
+            sys.stdout.flush() 
 
             items_added_count += 1
-            # Add the newly added encrypted ID to the set for duplicate checks in *this run*
             existing_encrypted_evidence_ids.add(encrypted_evidence_id)
 
-            # Update the prev_hash for the *next* block in the loop
             try:
                 current_prev_hash = calculate_hash(packed_new_block)
             except Exception as e:
                 print(f"Error calculating hash for next block after adding item '{item_id_str}': {e}. Stopping.", file=sys.stderr)
-                # Mark remaining as failed? Or just exit? Exiting might be safer.
                 sys.exit(1) # Exit if hashing fails, blockchain state is inconsistent
 
-            # Add spacing if multiple items are being processed AND this is not the last item
             if len(item_ids_list) > 1 and (items_added_count + items_failed_count) < len(item_ids_list):
                  print() # Print a newline between successful additions
                  sys.stdout.flush() # Flush after print
@@ -243,26 +219,120 @@ def add(case_id_str: str, item_ids_list: list[str], creator_str: str, password: 
         # Catch broader errors for the processing of a single item
         except Exception as e:
             print(f"An unexpected critical error occurred while processing item '{item_id_str}': {e}", file=sys.stderr)
-            # Optional: Add more detailed logging or traceback here
-            # import traceback
-            # traceback.print_exc()
             items_failed_count += 1
-            # Decide whether to continue or abort. Let's continue but log clearly.
             print(f"Skipping item '{item_id_str}' due to unexpected error.", file=sys.stderr)
             continue
 
-    # 9. Final check (outside loop)
     if items_added_count == 0 and items_failed_count > 0:
          print(f"\nNo items were added. {items_failed_count} item(s) failed.", file=sys.stderr)
-         sys.exit(1) # Exit with error if nothing was actually added successfully
+         sys.exit(1)
     elif items_failed_count > 0:
          print(f"\nWarning: {items_failed_count} item(s) could not be added.", file=sys.stderr)
 
-def checkin(item_id_str: str, password: str):
-    """Checks in an item, adding a new block to the chain."""
-    validate_password(password, ALLOWED_OWNER_ROLES) 
+def checkout(item_id_str: str, password: str):
+    """Checks out an item, adding a new block to the chain."""
+
+    validate_password(password, ALLOWED_OWNER_ROLES) # Exits on invalid password
 
     user_role = None
+    for role, env_var in ROLE_TO_ENV_VAR.items():
+
+        if role in ALLOWED_OWNER_ROLES:
+             env_password = os.getenv(env_var)
+             if env_password and env_password == password:
+                 user_role = role
+                 break
+
+    try:
+        blocks = read_blockchain()
+
+        last_item_block = None
+        try:
+            item_id_int = int(item_id_str)
+            if not (0 <= item_id_int <= 4294967295):
+                 raise ValueError("Item ID must be an integer representable in 4 bytes.")
+            item_id_bytes = item_id_int.to_bytes(4, 'big', signed=False) # Use same endianness as 'add'
+            target_evidence_id = encrypt_data(item_id_bytes, AES_KEY) # Encrypt the 4 bytes
+        except ValueError as e:
+             # If the input ID format itself is bad
+             print(f"Error: Invalid Item ID format '{item_id_str}'. {e}", file=sys.stderr)
+             sys.exit(1)
+        except Exception as e:
+             # If encryption fails
+             print(f"Error processing target Item ID '{item_id_str}': {e}", file=sys.stderr)
+             sys.exit(1)
+
+        # Find the most recent block for this item using the CORRECT target_evidence_id
+        last_item_block = None
+        for block in reversed(blocks):
+            # Compare the correctly processed encrypted bytes
+            if block.evidence_id == target_evidence_id:
+                last_item_block = block
+                break # Found the latest entry for this item
+        if last_item_block is None:
+            print(f"Error: Item ID '{item_id_str}' not found in the blockchain.", file=sys.stderr)
+            sys.exit(1)
+
+        # Compare bytes directly, removing trailing nulls first
+        current_state_bytes = last_item_block.state.rstrip(b'\x00')
+        if current_state_bytes in REMOVED_STATES:
+            state_str = current_state_bytes.decode('utf-8', 'replace')
+            print(f"Error: Item '{item_id_str}' has been removed ({state_str}) and cannot be checked out.", file=sys.stderr)
+            sys.exit(1)
+        if current_state_bytes != b'CHECKEDIN':
+            state_str = current_state_bytes.decode('utf-8', 'replace')
+            print(f"Error: Item '{item_id_str}' must be CHECKEDIN to checkout. Current state: {state_str}", file=sys.stderr)
+            sys.exit(1)
+
+        last_block_in_chain = blocks[-1]
+        prev_hash = calculate_hash(last_block_in_chain.pack())
+
+        timestamp = datetime.now(timezone.utc).timestamp()
+        case_id = last_item_block.case_id
+
+        new_state = b'CHECKEDOUT\0\0\0'
+        creator = last_item_block.creator
+
+        owner = user_role.upper().encode('utf-8').ljust(12, b'\x00')
+        data_length = 0
+        data = b''
+
+        new_block = Block(prev_hash, timestamp, case_id, target_evidence_id, new_state, creator, owner, data_length, data)
+
+        filepath = get_blockchain_file_path()
+        with open(filepath, 'ab') as f:
+            f.write(new_block.pack())
+
+        try:
+            decrypted_case_bytes = decrypt_data(case_id, AES_KEY)
+            if len(decrypted_case_bytes) == 16:
+                 decrypted_case_str = str(uuid.UUID(bytes=decrypted_case_bytes))
+            #string decoding
+            else:
+                 decrypted_case_str = decrypted_case_bytes.decode('utf-8', errors='replace').strip('\x00').strip()
+        except Exception:
+            decrypted_case_str = case_id.hex() # Fallback to hex
+
+        print(f"Case: {decrypted_case_str}")
+        print(f"Checked out item: {item_id_str}")
+        print(f"Status: CHECKEDOUT")
+        timestamp_str = datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec='microseconds') + 'Z'
+        print(f"Time of action: {timestamp_str}")
+
+    except FileNotFoundError:
+        print(f"Error: Blockchain file '{BLOCKCHAIN_FILE}' not found. Run 'init' first.", file=sys.stderr)
+        sys.exit(1)
+    except (IOError, struct.error, ValueError, Exception) as e:
+        print(f"An error occurred during checkout: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def checkin(item_id_str: str, password: str):
+    """Checks in an item, adding a new block to the chain."""
+    validate_password(password, ALLOWED_OWNER_ROLES)
+
+    # Determine user role (assuming you have get_role_from_password or similar)
+    user_role = None # Placeholder - needs actual implementation like in checkout
     for role, env_var in ROLE_TO_ENV_VAR.items():
         if role in ALLOWED_OWNER_ROLES:
             env_password = os.getenv(env_var)
@@ -274,67 +344,108 @@ def checkin(item_id_str: str, password: str):
          sys.exit(1)
 
     try:
-
         blocks = read_blockchain()
+        if not blocks:
+            print("Error: Blockchain is empty or not initialized.", file=sys.stderr)
+            sys.exit(1)
 
-        #last state
+        # --- Convert and Encrypt Target Item ID (FIX THIS - Same logic as add/checkout) ---
+        try:
+            item_id_int = int(item_id_str)
+            if not (0 <= item_id_int <= 4294967295):
+                 raise ValueError("Item ID must be an integer representable in 4 bytes.")
+            item_id_bytes = item_id_int.to_bytes(4, 'big', signed=False) # Use same endianness as 'add'
+            target_evidence_id = encrypt_data(item_id_bytes, AES_KEY) # Encrypt the 4 bytes
+        except ValueError as e:
+             print(f"Error: Invalid Item ID format '{item_id_str}'. {e}", file=sys.stderr)
+             sys.exit(1)
+        except Exception as e:
+             print(f"Error processing target Item ID '{item_id_str}': {e}", file=sys.stderr)
+             sys.exit(1)
+
+        # Find the most recent block for this item
         last_item_block = None
-        target_evidence_id = encrypt_data(item_id_str.encode('utf-8'), AES_KEY)
         for block in reversed(blocks):
-            if block.evidence_id == target_evidence_id:
+            if block.evidence_id == target_evidence_id: # Compare correct encrypted ID
                 last_item_block = block
                 break
 
+        # --- ADD THIS CHECK ---
+        # Check if item was actually found before proceeding
+        if last_item_block is None:
+            print(f"Error: Item ID '{item_id_str}' not found in the blockchain.", file=sys.stderr)
+            sys.exit(1)
+        # ----------------------
+
+        # Now it's safe to access state and other attributes
         current_state_bytes = last_item_block.state.rstrip(b'\x00')
+        state_str = current_state_bytes.decode('utf-8', 'replace') # For printing errors
+
+        # State checks (must be CHECKEDOUT for checkin)
         if current_state_bytes in REMOVED_STATES:
-            state_str = current_state_bytes.decode('utf-8', 'replace')
             print(f"Error: Item '{item_id_str}' has been removed ({state_str}) and cannot be checked in.", file=sys.stderr)
             sys.exit(1)
         if current_state_bytes != b'CHECKEDOUT':
-            state_str = current_state_bytes.decode('utf-8', 'replace')
             print(f"Error: Item '{item_id_str}' must be CHECKEDOUT to checkin. Current state: {state_str}", file=sys.stderr)
             sys.exit(1)
 
-        last_block_in_chain = blocks[-1]
+        # Prepare data for the new checkin block
+        last_block_in_chain = blocks[-1] # Actual last block in whole chain
         prev_hash = calculate_hash(last_block_in_chain.pack())
-
         timestamp = datetime.now(timezone.utc).timestamp()
         case_id = last_item_block.case_id
-
-        # evidence_id is target_evidence_id
         new_state = b'CHECKEDIN\0\0\0\0' # Padded to 12 bytes
         creator = last_item_block.creator
-        owner = user_role.upper().encode('utf-8').ljust(12, b'\x00')
+        owner = user_role.upper().encode('utf-8').ljust(12, b'\x00') # Owner is person checking in
         data_length = 0
         data = b''
 
-        new_block = Block(prev_hash, timestamp, case_id, target_evidence_id, new_state, creator, owner, data_length, data)
+        new_block = Block(
+            prev_hash,
+            timestamp,
+            case_id,
+            target_evidence_id, # Use the correctly processed ID
+            new_state,
+            creator,
+            owner,
+            data_length,
+            data
+        )
 
-        #append the new bloc
+        # Append the new block
         filepath = get_blockchain_file_path()
+        packed_new_block = new_block.pack()
         with open(filepath, 'ab') as f:
-            f.write(new_block.pack())
+            f.write(packed_new_block)
 
+        # Decrypt case ID for printing
         try:
             decrypted_case_bytes = decrypt_data(case_id, AES_KEY)
-            if len(decrypted_case_bytes) == 16:
+            try:
                  decrypted_case_str = str(uuid.UUID(bytes=decrypted_case_bytes))
-            else:
+            except ValueError:
                  decrypted_case_str = decrypted_case_bytes.decode('utf-8', errors='replace').strip('\x00').strip()
         except Exception:
             decrypted_case_str = case_id.hex()
 
+        # Print success output
         print(f"Case: {decrypted_case_str}")
         print(f"Checked in item: {item_id_str}")
         print(f"Status: CHECKEDIN")
-        timestamp_str = datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec='microseconds') + 'Z'
+        timestamp_dt = datetime.fromtimestamp(timestamp, timezone.utc)
+        timestamp_str = timestamp_dt.isoformat(timespec='microseconds').replace('+00:00', 'Z')
         print(f"Time of action: {timestamp_str}")
+        sys.stdout.flush()
 
     except FileNotFoundError:
-        print(f"Error: Blockchain file '{BLOCKCHAIN_FILE}' not found. Run 'init' first.", file=sys.stderr)
+        # Should be less likely now, but keep for robustness
+        filepath = get_blockchain_file_path() # Need path for error message
+        print(f"Error: Blockchain file '{filepath}' not found. Run 'init' first.", file=sys.stderr)
         sys.exit(1)
     except (IOError, struct.error, ValueError, Exception) as e:
         print(f"An error occurred during checkin: {e}", file=sys.stderr)
+        # import traceback # Optional for debugging
+        # traceback.print_exc()
         sys.exit(1)
 
 
