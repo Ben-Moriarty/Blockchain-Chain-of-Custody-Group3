@@ -1,11 +1,18 @@
 import struct
 from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad
+from Crypto.Util.Padding import pad, unpad
 import sys
 import hashlib
 import os
 
 from datetime import datetime, timezone
+
+BLOCK_FORMAT_STRING = "32s d 32s 32s 12s 12s 12s I"
+
+FIXED_HEADER_SIZE = struct.calcsize(BLOCK_FORMAT_STRING)
+
+INITIAL_BLOCK_DATA_LENGTH = 14
+INITIAL_BLOCK_TOTAL_SIZE = FIXED_HEADER_SIZE + INITIAL_BLOCK_DATA_LENGTH
 
 class Block:
 
@@ -21,15 +28,15 @@ class Block:
                 data_length: int,
                 data: bytes):
         
-        self.prev_hash = prev_hash
+        self.prev_hash = prev_hash.ljust(32, b'\x00')[:32]
         self.timestamp = timestamp
-        self.case_id = case_id
-        self.evidence_id = evidence_id
-        self.state = state
-        self.creator = creator
-        self.owner = owner
+        self.case_id = case_id.ljust(32, b'\x00')[:32]    
+        self.evidence_id = evidence_id.ljust(32, b'\x00')[:32]
+        self.state = state.ljust(12, b'\x00')[:12]     
+        self.creator = creator.ljust(12, b'\x00')[:12]  
+        self.owner = owner.ljust(12, b'\x00')[:12]       
         self.data_length = data_length
-        self.data = data
+        self.data = data[:data_length].ljust(data_length, b'\x00')
 
     def pack(self) -> bytes:
 
