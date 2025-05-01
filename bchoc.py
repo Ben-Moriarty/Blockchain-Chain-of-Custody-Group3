@@ -5,7 +5,7 @@ import sys
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-from Block import Block, decrypt_data, encrypt_data
+from Block import Block, decrypt_data, encrypt_data, validate_password, read_blockchain
 
 BLOCKCHAIN_FILE = 'blockchain.dat'
 BLOCK_SIZE = 158
@@ -32,6 +32,167 @@ def init():
         print("Blockchain file not found. Created INITIAL block.")
     else:
         print("Blockchain file found with INITIAL block.")
+
+def checkout(item_id_str: str, password: str):
+    """Checks out an item, adding a new block to the chain."""
+
+    validate_password(password, ALLOWED_OWNER_ROLES) # Exits on invalid password
+
+    user_role = None
+    for role, env_var in ROLE_TO_ENV_VAR.items():
+
+        if role in ALLOWED_OWNER_ROLES:
+             env_password = os.getenv(env_var)
+             if env_password and env_password == password:
+                 user_role = role
+                 break
+
+    try:
+        blocks = read_blockchain()
+
+        last_item_block = None
+        target_evidence_id = encrypt_data(item_id_str.encode('utf-8'), AES_KEY)
+        for block in reversed(blocks):
+            if block.evidence_id == target_evidence_id:
+                last_item_block = block
+                break # Found the most recent one
+
+        if last_item_block is None:
+            print(f"Error: Item ID '{item_id_str}' not found in the blockchain.", file=sys.stderr)
+            sys.exit(1)
+
+        # Compare bytes directly, removing trailing nulls first
+        current_state_bytes = last_item_block.state.rstrip(b'\x00')
+        if current_state_bytes in REMOVED_STATES:
+            state_str = current_state_bytes.decode('utf-8', 'replace')
+            print(f"Error: Item '{item_id_str}' has been removed ({state_str}) and cannot be checked out.", file=sys.stderr)
+            sys.exit(1)
+        if current_state_bytes != b'CHECKEDIN':
+            state_str = current_state_bytes.decode('utf-8', 'replace')
+            print(f"Error: Item '{item_id_str}' must be CHECKEDIN to checkout. Current state: {state_str}", file=sys.stderr)
+            sys.exit(1)
+
+        last_block_in_chain = blocks[-1]
+        prev_hash = calculate_hash(last_block_in_chain.pack())
+
+        timestamp = datetime.now(timezone.utc).timestamp()
+        case_id = last_item_block.case_id
+
+        new_state = b'CHECKEDOUT\0\0\0'
+        creator = last_item_block.creator
+
+        owner = user_role.upper().encode('utf-8').ljust(12, b'\x00')
+        data_length = 0
+        data = b''
+
+        new_block = Block(prev_hash, timestamp, case_id, target_evidence_id, new_state, creator, owner, data_length, data)
+
+        filepath = BLOCKCHAIN_FILE
+        with open(filepath, 'ab') as f:
+            f.write(new_block.pack())
+
+        try:
+            decrypted_case_bytes = decrypt_data(case_id, AES_KEY)
+            if len(decrypted_case_bytes) == 16:
+                 decrypted_case_str = str(uuid.UUID(bytes=decrypted_case_bytes))
+            #string decoding
+            else:
+                 decrypted_case_str = decrypted_case_bytes.decode('utf-8', errors='replace').strip('\x00').strip()
+        except Exception:
+            decrypted_case_str = case_id.hex() # Fallback to hex
+
+        print(f"Case: {decrypted_case_str}")
+        print(f"Checked out item: {item_id_str}")
+        print(f"Status: CHECKEDOUT")
+        timestamp_str = datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec='microseconds') + 'Z'
+        print(f"Time of action: {timestamp_str}")
+
+    except FileNotFoundError:
+        print(f"Error: Blockchain file '{BLOCKCHAIN_FILE}' not found. Run 'init' first.", file=sys.stderr)
+        sys.exit(1)
+    except (IOError, struct.error, ValueError, Exception) as e:
+        print(f"An error occurred during checkout: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def checkin(item_id_str: str, password: str):
+    """Checks in an item, adding a new block to the chain."""
+    validate_password(password, ALLOWED_OWNER_ROLES) 
+
+    user_role = None
+    for role, env_var in ROLE_TO_ENV_VAR.items():
+        if role in ALLOWED_OWNER_ROLES:
+            env_password = os.getenv(env_var)
+            if env_password and env_password == password:
+                user_role = role
+                break
+    if not user_role:
+         print("Error: Could not map validated password to a role.", file=sys.stderr)
+         sys.exit(1)
+
+    try:
+
+        blocks = read_blockchain()
+
+        #last state
+        last_item_block = None
+        target_evidence_id = encrypt_data(item_id_str.encode('utf-8'), AES_KEY)
+        for block in reversed(blocks):
+            if block.evidence_id == target_evidence_id:
+                last_item_block = block
+                break
+
+        current_state_bytes = last_item_block.state.rstrip(b'\x00')
+        if current_state_bytes in REMOVED_STATES:
+            state_str = current_state_bytes.decode('utf-8', 'replace')
+            print(f"Error: Item '{item_id_str}' has been removed ({state_str}) and cannot be checked in.", file=sys.stderr)
+            sys.exit(1)
+        if current_state_bytes != b'CHECKEDOUT':
+            state_str = current_state_bytes.decode('utf-8', 'replace')
+            print(f"Error: Item '{item_id_str}' must be CHECKEDOUT to checkin. Current state: {state_str}", file=sys.stderr)
+            sys.exit(1)
+
+        last_block_in_chain = blocks[-1]
+        prev_hash = calculate_hash(last_block_in_chain.pack())
+
+        timestamp = datetime.now(timezone.utc).timestamp()
+        case_id = last_item_block.case_id
+
+        # evidence_id is target_evidence_id
+        new_state = b'CHECKEDIN\0\0\0\0' # Padded to 12 bytes
+        creator = last_item_block.creator
+        owner = user_role.upper().encode('utf-8').ljust(12, b'\x00')
+        data_length = 0
+        data = b''
+
+        new_block = Block(prev_hash, timestamp, case_id, target_evidence_id, new_state, creator, owner, data_length, data)
+
+        #append the new bloc
+        filepath = BLOCKCHAIN_FILE
+        with open(filepath, 'ab') as f:
+            f.write(new_block.pack())
+
+        try:
+            decrypted_case_bytes = decrypt_data(case_id, AES_KEY)
+            if len(decrypted_case_bytes) == 16:
+                 decrypted_case_str = str(uuid.UUID(bytes=decrypted_case_bytes))
+            else:
+                 decrypted_case_str = decrypted_case_bytes.decode('utf-8', errors='replace').strip('\x00').strip()
+        except Exception:
+            decrypted_case_str = case_id.hex()
+
+        print(f"Case: {decrypted_case_str}")
+        print(f"Checked in item: {item_id_str}")
+        print(f"Status: CHECKEDIN")
+        timestamp_str = datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec='microseconds') + 'Z'
+        print(f"Time of action: {timestamp_str}")
+
+    except FileNotFoundError:
+        print(f"Error: Blockchain file '{BLOCKCHAIN_FILE}' not found. Run 'init' first.", file=sys.stderr)
+        sys.exit(1)
+    except (IOError, struct.error, ValueError, Exception) as e:
+        print(f"An error occurred during checkin: {e}", file=sys.stderr)
+        sys.exit(1)
+
 
 def show_cases():
     """
