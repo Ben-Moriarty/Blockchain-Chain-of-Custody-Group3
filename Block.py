@@ -154,27 +154,48 @@ class Block:
 # --- Utility Functions (potentially moved from bchoc.py if Block is standalone) ---
 
 def decrypt_data(encrypted_data: bytes, key: bytes) -> bytes:
-    """Decrypts data using AES ECB mode."""
+    """Decrypts data using AES ECB mode, assuming the input is 32 bytes
+       (16 bytes ciphertext + 16 bytes null padding from encrypt_data).
+       MODIFIED: Returns raw 16 decrypted bytes without unpadding.
+    """
     # print(f"DEBUG decrypt_data: Decrypting {len(encrypted_data)} bytes: {encrypted_data.hex()}")
     if not isinstance(encrypted_data, bytes):
         raise TypeError("encrypted_data must be bytes")
-    if not encrypted_data:
-        # print("DEBUG decrypt_data: Input data is empty, returning empty bytes.")
+
+    # --- Handle the non-standard encryption format ---
+    if len(encrypted_data) >= 16:
+        actual_ciphertext = encrypted_data[:16] # Extract the meaningful first 16 bytes
+    else:
+         # This case should ideally not happen if encrypt_data always produces 32 bytes
+         print(f"DEBUG decrypt_data: Input data too short (< 16 bytes): {encrypted_data.hex()}. Cannot decrypt.", file=sys.stderr)
+         raise ValueError(f"Input data too short ({len(encrypted_data)} bytes) for AES decryption.")
+
+    # Check if the extracted ciphertext is empty or all nulls (e.g., for Genesis case_id/evidence_id)
+    if not actual_ciphertext or actual_ciphertext == (b'\x00' * 16):
+        # print("DEBUG decrypt_data: Effective ciphertext is empty or nulls, returning empty bytes.")
         return b''
+    # --- End Handling ---
+
     try:
         cipher = AES.new(key, AES.MODE_ECB)
-        # Decrypt might include padding, so unpad it
-        decrypted_padded_data = cipher.decrypt(encrypted_data)
-        decrypted_data = unpad(decrypted_padded_data, AES.block_size)
-        # print(f"DEBUG decrypt_data: Decrypted data (after unpad): {decrypted_data.hex()}")
-        return decrypted_data
+        # Decrypt only the first 16 bytes
+        decrypted_bytes = cipher.decrypt(actual_ciphertext)
+
+        # --- MODIFICATION: Remove unpad ---
+        # Instead of unpadding, just return the decrypted 16 bytes.
+        # The caller will need to handle potential trailing padding/nulls if necessary when interpreting the data.
+        # print(f"DEBUG decrypt_data: Returning raw decrypted 16 bytes: {decrypted_bytes.hex()}")
+        return decrypted_bytes
+        # --- END MODIFICATION ---
+
+    # Catch ValueError specifically, which might indicate key issues if decryption itself fails
     except ValueError as e:
-        # ValueError could be due to bad padding or wrong key
-        print(f"DEBUG decrypt_data: Error during decryption/unpadding: {e}. Input was {encrypted_data.hex()}", file=sys.stderr)
-        raise ValueError(f"Decryption failed, possibly wrong key or corrupted data: {e}") from e
+         print(f"DEBUG decrypt_data: Error during AES decryption (ValueError): {e}. Ciphertext input (first 16 bytes) was {actual_ciphertext.hex()}", file=sys.stderr)
+         raise ValueError(f"Decryption failed: {e}") from e
+    # Catch other potential exceptions during cipher operation
     except Exception as e:
-        print(f"DEBUG decrypt_data: Unexpected error: {e}", file=sys.stderr)
-        raise
+        print(f"DEBUG decrypt_data: Unexpected error during decryption: {e}", file=sys.stderr)
+        raise # Re-raise other unexpected errors
 
 
 def encrypt_data(plain_bytes: bytes, key: bytes) -> bytes:
