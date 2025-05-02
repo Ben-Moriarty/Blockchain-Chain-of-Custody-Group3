@@ -16,7 +16,7 @@ FIXED_HEADER_SIZE = struct.calcsize(BLOCK_FORMAT_STRING)
 AES_KEY = b"R0chLi4uLi4uLi4=" # Must be 16 bytes for AES-128
 
 class Block:
-    BLOCK_FORMAT_STRING = "32s d 32s 32s 12s 12s 12s I"
+    BLOCK_FORMAT_STRING = "<32s d 32s 32s 12s 12s 12s I"
     FIXED_HEADER_SIZE = struct.calcsize(BLOCK_FORMAT_STRING)
 
     def __init__(self,
@@ -208,17 +208,10 @@ def encrypt_data(plain_bytes: bytes, key: bytes) -> bytes:
         # ALWAYS pad the input data using standard PKCS7 padding
         padded_data = pad(plain_bytes, AES.block_size) # Pad to 16 or 32 bytes
         encrypted_data = cipher.encrypt(padded_data) # Result length is multiple of 16
-
-        # --- MODIFICATION ---
-        # Take ONLY the first 16 bytes of the resulting ciphertext
-        first_block_ciphertext = encrypted_data[:16]
-
-        # Pad this 16-byte ciphertext to 32 bytes for the struct field
-        final_output = first_block_ciphertext.ljust(32, b'\x00')
-        # --- END MODIFICATION ---
+        final_output= encrypted_data.hex().encode('ascii')
 
         return final_output
-    except Exception as e:
+    except Exception as e:  
         print(f"Error during encryption: {e}", file=sys.stderr)
         raise ValueError(f"Encryption failed: {e}") from e
 
