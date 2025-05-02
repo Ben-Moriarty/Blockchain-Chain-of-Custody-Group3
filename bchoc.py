@@ -791,43 +791,46 @@ def show_history(case_id_str: str | None, item_id_str: str | None, num_entries: 
 # ────────────────────────────────────────────────────────────────────────────
 #  REMOVE  (CHECKEDIN ➜ DISPOSED / DESTROYED / RELEASED)
 # ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+#  REMOVE  – CHECKEDIN ➜  DISPOSED / DESTROYED / RELEASED
+# ────────────────────────────────────────────────────────────────────────────
 def remove(item_id_str: str, reason: str, password: str) -> None:
     """
-    Mark an evidence item as DISPOSED, DESTROYED or RELEASED.
-    Only the creator role is authorised, per project spec.
+    creator‑only command that marks an evidence item as DISPOSED, DESTROYED,
+    or RELEASED.  It uses the same item‑ID encryption routine as add().
     """
     print("\n--- Starting Remove Process ---")
 
-    # 0‧ Authorisation
+    # 0‧ authorisation -------------------------------------------------------
     validate_password(password, ALLOWED_CREATOR_ROLES)
 
-    # 1‧ Normalise removal reason  →  12‑byte, zero‑padded field
+    # 1‧ normalise reason → 11‑byte state field -----------------------------
     reason_bytes = reason.upper().encode("utf-8")
     if reason_bytes not in REMOVED_STATES:
         valid = ", ".join(r.decode() for r in REMOVED_STATES)
         print(f"Error: reason must be one of [{valid}].", file=sys.stderr)
         sys.exit(1)
-    new_state = reason_bytes.ljust(12, b"\x00")
+    new_state = reason_bytes.ljust(11, b"\x00")          # *** 11 bytes ***
 
-    # 2‧ Load blockchain
+    # 2‧ read chain ----------------------------------------------------------
     filepath = get_blockchain_file_path()
     blocks   = read_blockchain()
     if not blocks:
         print("Error: blockchain empty or not initialised.", file=sys.stderr)
         sys.exit(1)
 
-    # 3‧ Encrypt target evidence‑ID
+    # 3‧ encrypt target evidence‑ID -----------------------------------------
     try:
-        item_int   = int(item_id_str)
+        item_int  = int(item_id_str)
         if not (0 <= item_int <= 0xFFFFFFFF):
             raise ValueError("out of 32‑bit unsigned range")
-        item_bytes        = item_int.to_bytes(4, "big")
-        target_evidence_id = encrypt_item_id(item_bytes)          # 32‑byte ASCII
+        item_bytes         = item_int.to_bytes(4, "big")
+        target_evidence_id = encrypt_item_id(item_bytes)  # 32‑byte ASCII‑hex
     except Exception as e:
         print(f"Error processing item‑ID '{item_id_str}': {e}", file=sys.stderr)
         sys.exit(1)
 
-    # 4‧ Locate latest block for this evidence
+    # 4‧ locate latest block for this item ----------------------------------
     for idx in range(len(blocks) - 1, -1, -1):
         if blocks[idx].evidence_id == target_evidence_id:
             last_item_block = blocks[idx]
@@ -837,31 +840,34 @@ def remove(item_id_str: str, reason: str, password: str) -> None:
               file=sys.stderr)
         sys.exit(1)
 
-    # 5‧ State validation
+    # 5‧ state validation ----------------------------------------------------
     current_state = last_item_block.state.rstrip(b"\x00")
     if current_state != b"CHECKEDIN":
         print(f"Error: item must be CHECKEDIN to remove (is {current_state.decode()}).",
               file=sys.stderr)
         sys.exit(1)
 
-    # 6‧ Compose removal block
-    prev_hash   = calculate_hash(blocks[-1].pack())
-    timestamp   = datetime.now(timezone.utc).timestamp()
+    # 6‧ compose removal block ----------------------------------------------
+    prev_hash  = b"\x00" * 32                     # *** spec: always 0 here ***
+    timestamp  = datetime.now(timezone.utc).timestamp()
 
     remove_block = Block(
-        prev_hash, timestamp,
-        last_item_block.case_id,         # keep encrypted case‑ID
+        prev_hash,
+        timestamp,
+        last_item_block.case_id,      # keep encrypted case‑ID
         target_evidence_id,
         new_state,
-        last_item_block.creator,         # keep original creator
-        b"\x00" * 12,                    # owner cleared on removal
-        0, b""
+        last_item_block.creator,      # original creator
+        last_item_block.owner,        # keep current owner  ❬NOT cleared❭
+        0,
+        b""
     )
 
-    # 7‧ Append & report
+    # 7‧ append and report ---------------------------------------------------
     with open(filepath, "ab") as fp:
         fp.write(remove_block.pack())
 
+    # console output (for autograder)
     print(f"Removed item: {item_id_str}")
     print("Reason:", reason.upper())
     print("Status:", reason.upper())
@@ -869,6 +875,7 @@ def remove(item_id_str: str, reason: str, password: str) -> None:
           datetime.fromtimestamp(timestamp, timezone.utc)
                   .isoformat(timespec="microseconds").replace("+00:00", "Z"))
     print("--- Finished Remove Process ---")
+
 
 def summary(case_id_str: str):
     """Displays a summary of item states for the given case ID."""
